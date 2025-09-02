@@ -1,0 +1,24 @@
+# Azure Kinect captured images
+color_frame_*.jpg
+depth_frame_*.png
+ir_frame_*.png
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+archive/*
