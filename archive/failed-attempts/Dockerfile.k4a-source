@@ -1,0 +1,135 @@
+# Azure Kinect SDK built from Microsoft's official repository
+FROM nvidia/opengl:1.2-glvnd-devel-ubuntu22.04
+
+# Set environment variables to avoid interactive prompts
+ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ACCEPT_EULA=Y
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Install system dependencies for Ubuntu 22.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    git \
+    curl \
+    wget \
+    pkg-config \
+    libssl-dev \
+    libusb-1.0-0-dev \
+    libudev-dev \
+    libsoundio-dev \
+    libjpeg-turbo8-dev \
+    libturbojpeg0-dev \
+    libglfw3-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    freeglut3-dev \
+    mesa-common-dev \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    x11-apps \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxrandr-dev \
+    libxi-dev \
+    uuid-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Microsoft package repository for Ubuntu 22.04
+RUN curl -sSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
+    && echo "deb [arch=amd64] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" > /etc/apt/sources.list.d/microsoft-prod.list
+
+# Set working directory for build
+WORKDIR /build
+
+# Clone the official Azure Kinect SDK repository
+RUN echo "Cloning Microsoft Azure Kinect SDK..." && \
+    git clone --recursive https://github.com/microsoft/Azure-Kinect-Sensor-SDK.git
+
+# Build the Azure Kinect SDK
+WORKDIR /build/Azure-Kinect-Sensor-SDK
+RUN echo "Building Azure Kinect SDK from source..." && \
+    # First, patch OpenSSL 3.0 compatibility issues in azure_c_shared
+    cd /build/Azure-Kinect-Sensor-SDK && \
+    echo "Patching OpenSSL 3.0 compatibility..." && \
+    # Remove -Werror flags from all CMakeLists.txt files
+    find . -name "CMakeLists.txt" -exec sed -i 's/-Werror//g' {} \; && \
+    # Create a simple patch for OpenSSL 3.0 compatibility
+    cat > /tmp/openssl_patch.c << 'EOF'
+// Replacement for OpenSSL 3.0 compatibility
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+// Function to safely access extra certs in OpenSSL 3.0
+static int ssl_ctx_get_extra_certs(SSL_CTX *ctx, STACK_OF(X509) **certs) {
+    *certs = SSL_CTX_get_extra_chain_certs_only(ctx);
+    return 1;
+}
+
+static int ssl_ctx_clear_extra_certs(SSL_CTX *ctx) {
+    return SSL_CTX_clear_extra_chain_certs(ctx);
+}
+EOF
+    # Patch the problematic file
+    sed -i '79,82c\
+                // Use OpenSSL 3.0 compatible approach\
+                STACK_OF(X509) *extra_certs = NULL;\
+                if (SSL_CTX_get_extra_chain_certs_only(ssl_ctx) != NULL)\
+                {\
+                    SSL_CTX_clear_extra_chain_certs(ssl_ctx);\
+                }' extern/azure_c_shared/src/adapters/x509_openssl.c && \
+    mkdir build && \
+    cd build && \
+    cmake .. \
+        -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DK4A_BUILD_DOCS=OFF \
+        -DK4A_BUILD_EXAMPLES=ON \
+        -DCMAKE_C_FLAGS="-Wno-array-parameter -Wno-deprecated-declarations -Wno-discarded-qualifiers -Wno-error -w" \
+        -DCMAKE_CXX_FLAGS="-Wno-array-parameter -Wno-deprecated-declarations -Wno-discarded-qualifiers -Wno-error -w" && \
+    ninja
+
+# Install the built SDK
+RUN cd build && \
+    ninja install && \
+    ldconfig
+
+# Install Python dependencies and pyk4a
+RUN pip3 install --upgrade pip && \
+    pip3 install numpy
+
+# Build pyk4a from source to work with our SDK
+WORKDIR /build
+RUN git clone https://github.com/etiennedub/pyk4a.git && \
+    cd pyk4a && \
+    pip3 install -e .
+
+# Configure library paths
+RUN echo "/usr/local/lib" >> /etc/ld.so.conf.d/k4a.conf && \
+    echo "/build/Azure-Kinect-Sensor-SDK/build/bin" >> /etc/ld.so.conf.d/k4a.conf && \
+    ldconfig
+
+# Add built tools to PATH
+ENV PATH="/build/Azure-Kinect-Sensor-SDK/build/bin:/usr/local/bin:$PATH"
+
+# Set up NVIDIA OpenGL environment
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+ENV __GLX_VENDOR_LIBRARY_NAME=nvidia
+
+# Create workspace
+WORKDIR /workspace
+
+# Add some helpful debugging commands to bash history
+RUN echo "echo 'Azure Kinect SDK built from source - VPN compatible'" >> ~/.bashrc && \
+    echo "k4aviewer" >> ~/.bash_history && \
+    echo "python3 -c \"import pyk4a; print('pyk4a imported successfully')\"" >> ~/.bash_history && \
+    echo "ls /build/Azure-Kinect-Sensor-SDK/build/bin" >> ~/.bash_history
+
+# Default command
+CMD ["bash"]

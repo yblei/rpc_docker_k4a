@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile.mesa
     container_name: azure_kinect_mesa
     privileged: true
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     environment:
       # Mesa software OpenGL configuration
       - LIBGL_ALWAYS_SOFTWARE=1

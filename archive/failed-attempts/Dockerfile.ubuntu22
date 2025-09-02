@@ -1,0 +1,105 @@
+# Azure Kinect SDK built from source on Ubuntu with NVIDIA support
+FROM nvidia/opengl:1.2-glvnd-devel-ubuntu20.04
+
+# Set environment variables to avoid interactive prompts
+ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ACCEPT_EULA=Y
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Install basic dependencies first
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    gnupg \
+    lsb-release \
+    ca-certificates \
+    software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install build dependencies for full source compilation
+RUN apt-get update && apt-get install -y \
+    # Core build tools
+    gcc \
+    g++ \
+    clang \
+    cmake \
+    ninja-build \
+    pkg-config \
+    git \
+    git-lfs \
+    python3 \
+    python3-pip \
+    python3-dev \
+    nasm \
+    file \
+    dpkg-dev \
+    doxygen \
+    # Graphics and media libraries
+    libgl1-mesa-dev \
+    libegl1-mesa-dev \
+    libglu1-mesa-dev \
+    mesa-common-dev \
+    mesa-utils \
+    libx11-dev \
+    libsoundio-dev \
+    libjpeg-dev \
+    libvulkan-dev \
+    # USB and system libraries
+    libusb-1.0-0-dev \
+    libudev-dev \
+    uuid-dev \
+    # Additional dependencies
+    libssl-dev \
+    libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory for building
+WORKDIR /build
+
+# Clone Azure Kinect SDK source code
+RUN git clone --recursive https://github.com/microsoft/Azure-Kinect-Sensor-SDK.git
+
+# Build the SDK from source
+WORKDIR /build/Azure-Kinect-Sensor-SDK
+RUN mkdir build && cd build && \
+    cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release && \
+    ninja
+
+# Install the built SDK
+WORKDIR /build/Azure-Kinect-Sensor-SDK/build
+RUN ninja install
+
+# Install Python packages
+RUN pip3 install --upgrade pip
+RUN pip3 install numpy typing_extensions
+
+# Try to install pyk4a, if it fails we'll build it from source
+RUN pip3 install pyk4a || echo "pyk4a pip install failed, will build from source"
+
+# Build pyk4a from source if needed
+WORKDIR /build
+RUN git clone https://github.com/etiennedub/pyk4a.git && \
+    cd pyk4a && \
+    pip3 install -e . || echo "pyk4a source build failed"
+
+# Configure library paths
+RUN echo "/usr/lib/x86_64-linux-gnu/libk4a1.4" >> /etc/ld.so.conf.d/libk4a.conf && \
+    echo "/usr/local/lib" >> /etc/ld.so.conf.d/libk4a.conf && \
+    ldconfig
+
+# Set up environment variables for NVIDIA OpenGL
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+ENV __GLX_VENDOR_LIBRARY_NAME=nvidia
+
+# Create workspace
+WORKDIR /workspace
+
+# Add some helpful commands to bash history
+RUN echo "glxinfo | head -10" >> ~/.bash_history && \
+    echo "k4aviewer" >> ~/.bash_history && \
+    echo "python3 -c 'import pyk4a; print(\"pyk4a version:\", pyk4a.__version__ if hasattr(pyk4a, \"__version__\") else \"unknown\")'" >> ~/.bash_history
+
+# Default command
+CMD ["bash"]
