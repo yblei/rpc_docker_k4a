@@ -162,10 +162,27 @@ class RpcDockerK4a(AzureKinectRPCClient):
     
     def _find_build_script(self, script_name: str) -> Optional[str]:
         """Find the Docker build script"""
-        # Look in common locations
+        # First try to find in package installation (pip install case)
+        try:
+            # Get the package directory
+            package_dir = os.path.dirname(__file__)
+            docker_dir = os.path.join(package_dir, 'docker')
+            
+            if os.path.exists(docker_dir):
+                script_path = os.path.join(docker_dir, script_name)
+                if os.path.exists(script_path):
+                    # Make sure it's executable
+                    import stat
+                    current_mode = os.stat(script_path).st_mode
+                    os.chmod(script_path, current_mode | stat.S_IEXEC)
+                    return script_path
+        except Exception as e:
+            if self.verbose:
+                print(f"   Package location search failed: {e}")
+        
+        # Fallback: Look in development/source locations
         possible_paths = [
             os.path.join(os.getcwd(), 'rpc_docker_k4a', 'docker', script_name),
-            os.path.join(os.path.dirname(__file__), 'docker', script_name),
             os.path.join(os.getcwd(), 'docker', script_name),
             os.path.join(os.getcwd(), script_name),
             script_name
@@ -175,15 +192,29 @@ class RpcDockerK4a(AzureKinectRPCClient):
             if os.path.exists(path) and os.access(path, os.X_OK):
                 return path
         
+        # If not executable, try to make it executable
+        for path in possible_paths:
+            if os.path.exists(path):
+                try:
+                    import stat
+                    current_mode = os.stat(path).st_mode
+                    os.chmod(path, current_mode | stat.S_IEXEC)
+                    if os.access(path, os.X_OK):
+                        return path
+                except:
+                    continue
+        
         return None
     
     def _build_docker_image(self, image_type: str) -> str:
         """Build the Docker image and return the image name"""
         if image_type == 'nvidia':
             script_name = 'build-prebuilt-vpn.sh'
+            dockerfile_name = 'Dockerfile.k4a-prebuilt'
             image_name = 'azure-kinect-prebuilt-vpn'
         elif image_type == 'mesa':
             script_name = 'build-mesa-vpn.sh'
+            dockerfile_name = 'Dockerfile.mesa'
             image_name = 'azure-kinect-mesa-vpn'
         else:
             raise ValueError(f"Unknown image type: {image_type}")
@@ -196,8 +227,31 @@ class RpcDockerK4a(AzureKinectRPCClient):
         if script_path is None:
             raise RuntimeError(f"Build script '{script_name}' not found")
         
+        # Get the docker directory (where Dockerfile and other files are)
+        docker_dir = os.path.dirname(script_path)
+        
         if self.verbose:
             print(f"   Using script: {script_path}")
+            print(f"   Docker directory: {docker_dir}")
+        
+        # Verify required files exist
+        dockerfile_path = os.path.join(docker_dir, dockerfile_name)
+        rules_file_path = os.path.join(docker_dir, '99-k4a.rules')
+        
+        if not os.path.exists(dockerfile_path):
+            raise RuntimeError(f"Dockerfile not found: {dockerfile_path}")
+        
+        if not os.path.exists(rules_file_path):
+            # Try to copy from package directory
+            package_rules = os.path.join(os.path.dirname(__file__), '99-k4a.rules')
+            if os.path.exists(package_rules):
+                import shutil
+                shutil.copy2(package_rules, rules_file_path)
+                if self.verbose:
+                    print(f"   Copied 99-k4a.rules to docker directory")
+            else:
+                if self.verbose:
+                    print(f"   Warning: 99-k4a.rules not found, build may fail")
         
         # Run the build script
         try:
@@ -206,7 +260,7 @@ class RpcDockerK4a(AzureKinectRPCClient):
                 capture_output=not self.verbose, 
                 text=True, 
                 timeout=1800,  # 30 minutes for building
-                cwd=os.path.dirname(script_path)
+                cwd=docker_dir
             )
             
             if result.returncode != 0:
@@ -222,6 +276,8 @@ class RpcDockerK4a(AzureKinectRPCClient):
             raise RuntimeError(f"Docker image build timed out after 30 minutes")
         except FileNotFoundError:
             raise RuntimeError(f"Build script not executable: {script_path}")
+        except PermissionError:
+            raise RuntimeError(f"Permission denied executing build script: {script_path}")
     
     def _determine_docker_strategy(self) -> Tuple[str, str]:
         """
