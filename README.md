@@ -88,8 +88,39 @@ print(f"Color: {capture.color.shape}")
 
 ### K4A Viewer
 ```bash
-# Inside container
+# Launch k4aviewer GUI (NVIDIA version)
+./deploy-prebuilt-vpn.sh k4aviewer
+
+# Launch k4aviewer GUI (Mesa version)  
+./deploy-mesa-vpn.sh k4aviewer
+
+# Run inside container interactively
+./deploy-prebuilt-vpn.sh bash
+# Then inside container:
 k4aviewer
+```
+
+### Running Custom Scripts
+```bash
+# Run local Python script in container
+./deploy-prebuilt-vpn.sh python3 -c "
+import pyk4a
+from pyk4a import Config, PyK4A
+k4a = PyK4A()
+k4a.start()
+print('Azure Kinect connected!')
+"
+
+# Mount and run local file
+docker run -it --rm \
+    --runtime=nvidia \
+    --privileged \
+    --network=host \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+    -v $(pwd)/example_capture.py:/test/my_script.py \
+    azure-kinect-prebuilt-vpn \
+    python3 /test/my_script.py
 ```
 
 ## 🏗️ Architecture
