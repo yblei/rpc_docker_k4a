@@ -1,0 +1,76 @@
+# Azure Kinect Docker image with CPU-only Mesa OpenGL rendering
+FROM ubuntu:18.04
+
+# Prevent interactive prompts during apt installs
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Configure Mesa to use software rendering
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV MESA_GL_VERSION_OVERRIDE=4.5
+ENV MESA_GLSL_VERSION_OVERRIDE=450
+
+# Install basic dependencies including Mesa
+RUN apt update -y && apt install -y --no-install-recommends \
+    curl \
+    wget \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    python3 \
+    python3-pip \
+    python3-dev \
+    cmake \
+    ninja-build \
+    build-essential \
+    pkg-config \
+    libusb-1.0-0-dev \
+    mesa-utils \
+    libegl1-mesa \
+    libgl1-mesa-glx \
+    libglu1-mesa \
+    mesa-common-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Microsoft repository for Azure Kinect
+RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add -
+RUN echo "deb [arch=amd64] https://packages.microsoft.com/ubuntu/18.04/prod bionic main" >> /etc/apt/sources.list
+
+# Install Azure Kinect SDK
+RUN apt update -y && ACCEPT_EULA=Y apt install -y \
+    k4a-tools=1.4.2 \
+    libk4a1.4=1.4.2 \
+    libk4a1.4-dev=1.4.2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and install Python packages
+RUN pip3 install --upgrade pip
+
+# Install Python packages (minimal set for Azure Kinect)
+RUN pip3 install numpy typing_extensions
+
+# Install pyk4a with fallback options
+RUN pip3 install pyk4a --no-cache-dir || \
+    pip3 install --no-binary pyk4a pyk4a || \
+    echo "pyk4a installation failed, will need manual compilation"
+
+# Configure library paths
+RUN echo "/usr/lib/x86_64-linux-gnu/libk4a1.4" >> /etc/ld.so.conf.d/libk4a.conf
+RUN ldconfig
+
+# Set working directory
+WORKDIR /workspace
+
+# Test Mesa configuration
+RUN echo "Testing Mesa software rendering..." && \
+    glxinfo | grep -E "OpenGL version|OpenGL vendor|OpenGL renderer" || \
+    echo "Mesa info not available during build"
+
+# Add useful commands to bash history
+RUN echo "export LIBGL_ALWAYS_SOFTWARE=1" >> ~/.bashrc
+RUN echo "glxinfo | grep -E 'OpenGL version|renderer|vendor'" >> ~/.bash_history
+RUN echo "k4aviewer" >> ~/.bash_history
+RUN echo "python3 -c \"import pyk4a; print('pyk4a works!')\"" >> ~/.bash_history
+RUN echo "python3 test_depth.py" >> ~/.bash_history
+
+# Default command
+CMD ["bash"]
