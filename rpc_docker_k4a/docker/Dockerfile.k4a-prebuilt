@@ -5,7 +5,7 @@ FROM nvidia/opengl:1.2-glvnd-devel-ubuntu22.04
 # Set timezone
 RUN ln -snf /usr/share/zoneinfo/UTC /etc/localtime && echo UTC > /etc/timezone
 
-# Install essential dependencies
+# Install essential dependencies including Xvfb for virtual display
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
     cmake \
@@ -24,6 +24,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libxrender1 \
     libfontconfig1 \
     libice6 \
+    xvfb \
+    mesa-utils \
+    libgl1-mesa-dri \
+    libglu1-mesa \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Microsoft repository keys and sources
@@ -57,6 +61,57 @@ RUN apt-get update && \
 
 # Install Python Azure Kinect SDK
 RUN pip3 install pyk4a opencv-python numpy
+
+# Create startup script with integrated Xvfb
+RUN cat > /usr/local/bin/start-with-xvfb.sh << 'EOF'
+#!/bin/bash
+echo "🖥️  Starting Azure Kinect with virtual display..."
+
+# Start Xvfb virtual display
+Xvfb :0 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+XVFB_PID=$!
+
+# Wait for display to start
+sleep 3
+
+# Set environment variables
+export DISPLAY=:0
+export LIBGL_ALWAYS_SOFTWARE=0
+export NVIDIA_VISIBLE_DEVICES=all
+export NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+
+echo "Environment configured:"
+echo "  DISPLAY=$DISPLAY"
+echo "  LIBGL_ALWAYS_SOFTWARE=$LIBGL_ALWAYS_SOFTWARE"
+echo "  NVIDIA_VISIBLE_DEVICES=$NVIDIA_VISIBLE_DEVICES"
+
+# Test OpenGL
+echo ""
+echo "🧪 Testing OpenGL context..."
+timeout 10 glxinfo | grep -E "(OpenGL version|OpenGL renderer)" 2>/dev/null || echo "⚠️  OpenGL test timeout (expected over SSH)"
+
+echo ""
+echo "🎯 Azure Kinect ready with virtual display!"
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up virtual display..."
+    kill $XVFB_PID 2>/dev/null || true
+    exit 0
+}
+trap cleanup SIGTERM SIGINT EXIT
+
+# Execute command or keep running
+if [ $# -eq 0 ]; then
+    echo "Container ready. Press Ctrl+C to exit."
+    # Keep container alive
+    tail -f /dev/null
+else
+    exec "$@"
+fi
+EOF
+
+RUN chmod +x /usr/local/bin/start-with-xvfb.sh
 
 # Copy udev rules for device access (will be used when mounting /etc/udev/rules.d)
 COPY 99-k4a.rules /tmp/99-k4a.rules
@@ -103,5 +158,5 @@ ENV DISPLAY=:0
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
-# Default command
-CMD ["python3", "/test/test_k4a.py"]
+# Default command - start with virtual display
+CMD ["/usr/local/bin/start-with-xvfb.sh"]

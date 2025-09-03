@@ -12,7 +12,7 @@ import sys
 import time
 import socket
 import subprocess
-from typing import Optional, Union, Tuple, Any, Dict, List
+from typing import Optional, Tuple, Any, Dict
 import atexit
 
 # Import the client class
@@ -27,9 +27,9 @@ class RpcDockerK4a(AzureKinectRPCClient):
     in a Docker container when instantiated and cleaning it up when destroyed.
     It inherits all client functionality from AzureKinectRPCClient.
     
-    PyK4A is assumed to never be available on the host system, so this
-    class will automatically build and run the appropriate Docker container
-    based on available hardware acceleration.
+    By default this class prefers using a local server when PyK4A is
+    installed on the host, otherwise it will build and run the appropriate
+    Docker container based on available hardware acceleration.
     
     Example:
         >>> # Basic usage with auto-detection and building
@@ -68,8 +68,10 @@ class RpcDockerK4a(AzureKinectRPCClient):
             port: Server port to use. If None, will find an available port
             host: Server host address
             timeout: Connection timeout in seconds (increased for building)
-            use_docker: Docker usage strategy:
-                - 'auto': Auto-detect best Docker setup and build if needed
+            use_docker: Execution strategy:
+                - 'auto': Prefer local server if PyK4A is available;
+                         else Docker
+                - 'none' or 'local': Force local server (no Docker)
                 - 'nvidia': Force NVIDIA Docker container (build if needed)
                 - 'mesa': Force Mesa Docker container (build if needed)
             docker_image: Docker image to use:
@@ -84,17 +86,19 @@ class RpcDockerK4a(AzureKinectRPCClient):
         self.verbose = verbose
         self.auto_build = auto_build
         self.server_container_id = None
+        self.server_process = None
         self._port = port
         self._host = host
         self._timeout = timeout
         self._cleanup_registered = False
-        
+
         # Find available port if not specified
         if self._port is None:
             self._port = self._find_available_port(8000)
             
         if self.verbose:
-            print(f"📡 Initializing RPC Docker K4A on {self._host}:{self._port}")
+            msg = f"📡 Initializing RPC Docker K4A on {self._host}:{self._port}"
+            print(msg)
             print(f"   Docker mode: {self.use_docker}")
             print(f"   Docker image: {self.docker_image}")
             print(f"   Auto-build: {self.auto_build}")
@@ -110,6 +114,26 @@ class RpcDockerK4a(AzureKinectRPCClient):
         if not self._cleanup_registered:
             atexit.register(self._cleanup)
             self._cleanup_registered = True
+
+    def _check_pyk4a_available(self) -> bool:
+        """
+        Check if pyk4a is available on the host system.
+        
+        In production Docker environments, this typically returns False
+        as pyk4a is run inside containers for better isolation and
+        OpenGL context management.
+        
+        Returns:
+            bool: True if pyk4a can be imported, False otherwise
+        """
+        try:
+            __import__('pyk4a')
+            return True
+        except ImportError:
+            return False
+        except Exception:
+            # Catch any other import-related errors
+            return False
     
     def _find_available_port(self, start_port: int) -> int:
         """Find an available port starting from start_port"""
@@ -120,13 +144,17 @@ class RpcDockerK4a(AzureKinectRPCClient):
                     return port
             except OSError:
                 continue
-        raise RuntimeError(f"Could not find available port starting from {start_port}")
+        raise RuntimeError(
+            f"Could not find available port starting from {start_port}"
+        )
     
     def _check_docker_available(self) -> bool:
         """Check if Docker is available"""
         try:
-            result = subprocess.run(['docker', '--version'], 
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                ['docker', '--version'],
+                capture_output=True, text=True, timeout=5
+            )
             return result.returncode == 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
@@ -135,17 +163,22 @@ class RpcDockerK4a(AzureKinectRPCClient):
         """Check if NVIDIA Container Toolkit is installed"""
         try:
             # Check for nvidia-container-runtime
-            result = subprocess.run(['which', 'nvidia-container-runtime'], 
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(
+                ['which', 'nvidia-container-runtime'],
+                capture_output=True, text=True, timeout=5
+            )
             if result.returncode == 0:
                 return True
             
             # Check Docker daemon configuration
-            result = subprocess.run(['docker', 'info'], 
-                                  capture_output=True, text=True, timeout=10)
+            result = subprocess.run(
+                ['docker', 'info'],
+                capture_output=True, text=True, timeout=10
+            )
             if result.returncode == 0:
                 info_output = result.stdout.lower()
-                return 'nvidia' in info_output or 'container-runtime' in info_output
+                return ('nvidia' in info_output or
+                        'container-runtime' in info_output)
             
             return False
         except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -154,8 +187,10 @@ class RpcDockerK4a(AzureKinectRPCClient):
     def _check_docker_image_exists(self, image_name: str) -> bool:
         """Check if Docker image exists locally"""
         try:
-            result = subprocess.run(['docker', 'images', '-q', image_name], 
-                                  capture_output=True, text=True, timeout=10)
+            result = subprocess.run(
+                ['docker', 'images', '-q', image_name],
+                capture_output=True, text=True, timeout=10
+            )
             return bool(result.stdout.strip())
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
@@ -201,7 +236,7 @@ class RpcDockerK4a(AzureKinectRPCClient):
                     os.chmod(path, current_mode | stat.S_IEXEC)
                     if os.access(path, os.X_OK):
                         return path
-                except:
+                except OSError:
                     continue
         
         return None
@@ -243,15 +278,17 @@ class RpcDockerK4a(AzureKinectRPCClient):
         
         if not os.path.exists(rules_file_path):
             # Try to copy from package directory
-            package_rules = os.path.join(os.path.dirname(__file__), '99-k4a.rules')
+            package_dir = os.path.dirname(__file__)
+            package_rules = os.path.join(package_dir, '99-k4a.rules')
             if os.path.exists(package_rules):
                 import shutil
                 shutil.copy2(package_rules, rules_file_path)
                 if self.verbose:
-                    print(f"   Copied 99-k4a.rules to docker directory")
+                    print("   Copied 99-k4a.rules to docker directory")
             else:
                 if self.verbose:
-                    print(f"   Warning: 99-k4a.rules not found, build may fail")
+                    msg = "   Warning: 99-k4a.rules not found, build may fail"
+                    print(msg)
         
         # Run the build script
         try:
@@ -331,14 +368,26 @@ class RpcDockerK4a(AzureKinectRPCClient):
         return image_type, image_name
     
     def _start_server(self):
-        """Start the RPC server in a Docker container"""
-        if self.server_container_id is not None:
+        """Start the RPC server (local if possible, else Docker)."""
+        if self.server_container_id is not None or self.server_process is not None:
             if self.verbose:
                 print("⚠️  Server already running")
             return
-        
-        image_type, image_name = self._determine_docker_strategy()
-        self._start_docker_server(image_type, image_name)
+
+        # Choose local vs docker
+        pyk4a_ok = self._check_pyk4a_available()
+        use_local = (
+            self.use_docker in ('none', 'local') or
+            (self.use_docker == 'auto' and pyk4a_ok)
+        )
+
+        if use_local:
+            if self.verbose:
+                print("🖥️  Starting local RPC server (no Docker)")
+            self._start_local_server()
+        else:
+            image_type, image_name = self._determine_docker_strategy()
+            self._start_docker_server(image_type, image_name)
         
         # Wait for server to start
         if self.verbose:
@@ -358,6 +407,27 @@ class RpcDockerK4a(AzureKinectRPCClient):
             time.sleep(1)
         
         raise RuntimeError(f"Server failed to start within {self._timeout} seconds")
+
+    def _start_local_server(self):
+        """Start server as a local subprocess using host Python environment."""
+        # Build command to run the server module/script
+        current_dir = os.path.abspath(os.path.dirname(__file__))
+        server_path = os.path.join(current_dir, 'server.py')
+        cmd = [sys.executable, server_path, '--host', '0.0.0.0', '--port', str(self._port)]
+        if self.verbose:
+            print(f"   Command: {' '.join(cmd)}")
+        try:
+            # Start background process
+            self.server_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE if not self.verbose else None,
+                stderr=subprocess.PIPE if not self.verbose else None,
+                text=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("Failed to start local server: server.py not found")
+        except Exception as e:
+            raise RuntimeError(f"Failed to start local server: {e}")
     
     def _start_docker_server(self, image_type: str, image_name: str):
         """Start server in Docker container"""
@@ -374,11 +444,16 @@ class RpcDockerK4a(AzureKinectRPCClient):
                 print("   Using NVIDIA runtime")
         
         # Add necessary Docker arguments for Kinect access
+        # The container now has integrated Xvfb, so we use :0 consistently
+        display = ':0'  # Container uses internal virtual display
+        
         cmd.extend([
             '--privileged',
             '--network=host',  # Use host networking for simplicity
-            '-e', 'DISPLAY=:0',
-            '-v', '/tmp/.X11-unix:/tmp/.X11-unix:rw',
+            '-e', f'DISPLAY={display}',
+            '-e', 'LIBGL_ALWAYS_SOFTWARE=0',  # Use NVIDIA GPU acceleration
+            '-e', 'NVIDIA_VISIBLE_DEVICES=all',
+            '-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics',
             '-v', '/dev:/dev:rw',
             '-v', '/etc/udev/rules.d:/etc/udev/rules.d:rw',
             '--device-cgroup-rule=c 81:* rmw',
@@ -393,6 +468,7 @@ class RpcDockerK4a(AzureKinectRPCClient):
         # Add image and command - look for server in mounted workspace
         cmd.extend([
             image_name,
+            '/usr/local/bin/start-with-xvfb.sh',  # Use Xvfb startup script
             'python3', '/workspace/rpc_docker_k4a/server.py',
             '--host', '0.0.0.0',
             '--port', str(self._port)
@@ -437,6 +513,24 @@ class RpcDockerK4a(AzureKinectRPCClient):
                     print(f"   Error stopping container: {e}")
             finally:
                 self.server_container_id = None
+
+        # Stop local process
+        if self.server_process:
+            try:
+                if self.verbose:
+                    print("   Terminating local server process")
+                self.server_process.terminate()
+                try:
+                    self.server_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    if self.verbose:
+                        print("   Killing local server process")
+                    self.server_process.kill()
+            except Exception as e:
+                if self.verbose:
+                    print(f"   Error terminating local server: {e}")
+            finally:
+                self.server_process = None
     
     def close(self):
         """Close the connection and clean up the server"""
@@ -499,6 +593,7 @@ class RpcDockerK4a(AzureKinectRPCClient):
             'auto_build': self.auto_build,
             'nvidia_toolkit_available': self._check_nvidia_container_toolkit(),
             'using_docker': self.server_container_id is not None,
+            'using_local': self.server_process is not None,
         }
         
         if self.server_container_id:
@@ -515,8 +610,8 @@ def main():
     parser.add_argument('--port', type=int, default=None, help='Server port (auto-detect if not specified)')
     parser.add_argument('--host', default='localhost', help='Server host')
     parser.add_argument('--timeout', type=float, default=60.0, help='Connection timeout')
-    parser.add_argument('--docker', choices=['auto', 'nvidia', 'mesa'], 
-                       default='auto', help='Docker image type')
+    parser.add_argument('--docker', choices=['auto', 'nvidia', 'mesa', 'none', 'local'], 
+                       default='auto', help='Execution mode: auto/local/mesa/nvidia')
     parser.add_argument('--image', default='auto', help='Docker image name')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--no-auto-start', action='store_true', help='Don\'t auto-start server')
